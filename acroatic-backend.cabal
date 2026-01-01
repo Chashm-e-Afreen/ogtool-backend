@@ -1,0 +1,22 @@
+cabal-version:       3.8
+name:                acroatic-backend
+version:             0.1.0.0
+
+executable acroatic-b
+  main-is:             Main.hs
+  build-depends:       base >= 4.7 && < 5
+                     , scotty
+                     , text
+                     , req
+                     , clock
+                     , aeson
+                     , http-types
+                     , mime-mail
+                     , wai-cors
+                     , wai-middleware-throttle
+                     , directory
+                     , bytestring
+                     , base64-bytestring
+                     , safe-exceptions
+  other-modules:       Company
+  default-language:    Haskell2010
