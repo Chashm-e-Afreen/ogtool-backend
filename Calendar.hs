@@ -1,47 +1,178 @@
 module Calendar where
 
-generateWeekPlan :: Int -> [Persona] -> [Keyword] -> [String] -> ContentPlan
-generateWeekPlan weekNum allPersonas allKeywords allSubreddits =
+import Domain
+import Data.Time (UTCTime(..), Day, addDays, secondsToDiffTime)
+import Data.List (intercalate)
+import Control.Concurrent.Async (mapConcurrently)
+
+
+calculateBaseTime :: UTCTime -> Int -> Int -> UTCTime
+calculateBaseTime startTime weekNum postIndex =
     let
-        postsPerWeek = 3
-        
-        -- A. Keyword Selection (Infinite Rotation)
-        -- Uses 'drop' and 'take' to cycle through the list forever
-        startIndex = (weekNum * postsPerWeek) `mod` (length allKeywords)
+        -- Calculate total days to add from the project start
+        daysToAdd = (fromIntegral weekNum * 7) + (fromIntegral postIndex * 2)
+
+        -- Add days to the date part of UTCTime
+        newDay = addDays daysToAdd (utctDay startTime)
+
+        -- Keep the same time of day (or randomize it here if you want)
+        sameTime = utctDayTime startTime
+    in
+        UTCTime { utctDay = newDay, utctDayTime = sameTime }
+
+createBlueprint :: UTCTime -> Int -> [Persona] -> Int -> String -> String -> ThreadBlueprint
+createBlueprint startTime weekNum personas postIndex keyword subreddit =
+    let
+        -- Deterministic Rotation based on Week + PostIndex
+        rotationCount = weekNum + postIndex
+        rotatedPersonas = rotateList rotationCount personas
+
+        -- Safe Pattern Matching to get Poster + Repliers
+        (poster, repliers) = case rotatedPersonas of
+            (p : r1 : r2 : _) -> (p, [r1, r2])
+            (p : rest)        -> (p, take 2 (cycle rest))
+            []                -> error "Persona list cannot be empty!"
+
+        -- Calculate Time
+        baseTime = calculateBaseTime startTime weekNum postIndex
+    in
+        -- THE FIX: We now include 'postIndex' as the first argument
+        ThreadBlueprint
+            { tbPostIndex = postIndex
+            , tbKeyword = keyword
+            , tbSubreddit = subreddit
+            , tbPoster = poster
+            , tbRepliers = repliers
+            , tbPostTime = baseTime
+            }
+
+-- | Safe List Rotator
+rotateList :: Int -> [a] -> [a]
+rotateList _ [] = []
+rotateList n xs =
+    let len = length xs
+        -- Use modulo to avoid unnecessary cycles
+        effectiveN = n `mod` len
+    in drop effectiveN xs ++ take effectiveN xs
+
+-- Updated Main Logic
+generateWeekPlan :: UTCTime -> Int -> Int -> [Persona] -> [String] -> [String] -> ContentPlan
+generateWeekPlan startTime weekNum postsPerWeek allPersonas allKeywords allSubreddits =
+    let
+        posts = min postsPerWeek 7
+        -- Keywords: standard cycle logic
+        startIndex = (weekNum * postsPerWeek) `mod` length allKeywords
         selectedKeywords = take postsPerWeek $ drop startIndex (cycle allKeywords)
 
-        -- B. Subreddit Selection (Round Robin)
-        -- Ensures we don't spam the same sub every post
-        subStartIndex = (weekNum * postsPerWeek) `mod` (length allSubreddits)
+        -- Subreddits: standard cycle logic
+        subStartIndex = (weekNum * postsPerWeek) `mod` length allSubreddits
         selectedSubs = take postsPerWeek $ drop subStartIndex (cycle allSubreddits)
 
-        -- C. Persona Pairing (The "No Self-Reply" Logic)
-        -- We zip the keywords with a rotated list of personas
-        threadBlueprints = zipWith3 (createBlueprint weekNum allPersonas) 
-                                    [0..] 
-                                    selectedKeywords 
+        -- Zip safely
+        threadBlueprints = zipWith3 (createBlueprint startTime weekNum allPersonas)
+                                    [0..]
+                                    selectedKeywords
                                     selectedSubs
     in
         ContentPlan weekNum threadBlueprints
 
--- Helper: Create a single thread scenario
-createBlueprint :: Int -> [Persona] -> Int -> Keyword -> String -> ThreadBlueprint
-createBlueprint weekNum personas postIndex keyword subreddit =
-    let
-        -- Deterministic Shuffle based on Week + PostIndex
-        -- (Ensures Riley isn't always the poster)
-        rotatedPersonas = rotateList (weekNum + postIndex) personas
-        
-        poster = head rotatedPersonas
-        
-        -- Take the next 2 distinct personas as repliers
-        repliers = take 2 (drop 1 rotatedPersonas)
-        
-        -- Calculate Time (e.g., Monday + postIndex * 2 days)
-        baseTime = calculateBaseTime weekNum postIndex 
-    in
-        ThreadBlueprint keyword subreddit poster repliers baseTime
+constructPostPrompt :: Persona -> String -> String -> String
+constructPostPrompt author keyword subreddit =
+    unlines
+        [ "Role: You are " ++ pName author
+        , "Bio: " ++ pInfo author
+        , "Task: Write a Reddit post for r/" ++ subreddit
+        , "Topic: Ask a question about '" ++ keyword ++ "'"
+        , "Constraint 1: Use a specific detail from your bio."
+        , "Constraint 2: Do not sound like a marketer."
+        , "Output: Just the post text, nothing else."
+        ]
 
--- Simple list rotator
-rotateList :: Int -> [a] -> [a]
-rotateList n xs = take (length xs) . drop (n `mod` length xs) . cycle $ xs
+constructReplyPrompt :: Persona -> String -> String -> String
+constructReplyPrompt author parentContent companyName =
+    unlines
+        [ "Role: You are " ++ pName author
+        , "Bio: " ++ pInfo author
+        , "Task: Reply to this Reddit comment: \"" ++ parentContent ++ "\""
+        , "Goal: Agree with them and subtly recommend " ++ companyName
+        , "Constraint: Keep it under 2 sentences."
+        ]
+
+-- A generic type for your LLM function
+type LLMGenerator = String -> IO String
+
+realizePlan :: LLMGenerator -> CompanyInfo -> ContentPlan -> IO FinalCalendar
+realizePlan callAI company plan = do
+    -- 1. Generate the Threads (Post + bundled Comments)
+    realizedThreads <- mapConcurrently (generateThreadContent callAI company) (cpThreads plan)
+
+    -- 2. Flatten the structure for the Final View
+    let allPosts = map rtPost realizedThreads
+    let allComments = concatMap rtComments realizedThreads
+
+    -- 3. Return the corrected FinalCalendar type
+    return $ FinalCalendar
+        { fcWeekId = "WEEK-" ++ show (cpWeek plan)
+        , fcPosts = allPosts
+        , fcComments = allComments
+        , fcQualityScore = Nothing -- Will be filled by Evaluate phase
+        , fcIssues = []
+        }
+        
+generateComment :: LLMGenerator -> CompanyInfo -> String -> String -> Persona -> IO Comment
+generateComment callAI company parentId parentText replier = do
+
+    -- 1. Build the specific prompt for a reply
+    -- We include the parent text so the LLM knows what it is replying to.
+    let prompt = unlines
+            [ "Role: You are " ++ pName replier
+            , "Bio: " ++ pInfo replier
+            , "Task: Write a Reddit comment replying to this post: " ++ show parentText
+            , "Objective: Validate the original poster's pain point."
+            , "Strategy: varied. If PostIndex is even: Complain about the problem, share a war story, do NOT mention any products. If PostIndex is odd: Briefly mention" ++ cName company ++ "helped you, but be low-key. No marketing fluff, no emojis, no 'game-changer'."
+            , "Constraint: Keep it under 280 characters. Do not sound like a bot."
+            ]
+
+    commentText <- callAI prompt
+
+    return $ Comment
+        { cTargetId = parentId
+        , cAuthor = replier
+        , cContent = commentText
+        , cDelayMinutes = 5
+        }
+
+generateThreadContent :: LLMGenerator -> CompanyInfo -> ThreadBlueprint -> IO RealizedThread
+generateThreadContent callAI company blueprint = do
+    -- 1. Build the prompt using the Pure logic helper
+    let postPrompt = constructPostPrompt
+                        (tbPoster blueprint)
+                        (tbKeyword blueprint)
+                        (tbSubreddit blueprint)
+
+    -- 2. EXECUTE IO: Call OpenAI to get the post text
+    --    This is where 'postText' is created.
+    postText <- callAI postPrompt
+
+    -- 3. Construct the Post ID (e.g., "P1")
+    --    We need this to link comments to this post.
+    let postId = "P" ++ show (tbPostIndex blueprint)
+
+    -- 4. Create the Post Record
+    let post = Post {
+        postId = postId,
+        pSubreddit = tbSubreddit blueprint,
+        pAuthor = tbPoster blueprint,
+        pContent = postText,   -- <--- Used here to fill the post body
+        pTimestamp = tbPostTime blueprint
+    }
+
+    -- 5. Generate Replies
+    --    We pass 'postText' here so the repliers know what they are replying to.
+    comments <- mapM (generateComment callAI company postId postText)
+                     (tbRepliers blueprint)
+
+    return $ RealizedThread
+        { rtPost = post
+        , rtComments = comments
+        }
