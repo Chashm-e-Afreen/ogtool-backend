@@ -66,7 +66,7 @@ corsPolicy = cors (const $ Just policy)
             }
             
 main :: IO ()
-main = scotty 3000 $ do
+main = scotty 3001 $ do
   middleware corsPolicy
   post "/generate-week" $ do
     req <- jsonData :: ActionM GenerateRequest

@@ -40,7 +40,7 @@ This tool runs as a local web server that accepts requests to generate content c
     ```bash
     stack run
     ```
-    The server will start on port `3000`.
+    The server will start on port `3001`.
 
 ## Usage
 
@@ -48,7 +48,7 @@ This tool runs as a local web server that accepts requests to generate content c
 
 Send a `POST` request to `/generate-week` to generate a content plan.
 
-**Endpoint:** `POST http://localhost:3000/generate-week`
+**Endpoint:** `POST http://localhost:3001/generate-week`
 
 **JSON Body:**
 ```json
@@ -62,7 +62,7 @@ Send a `POST` request to `/generate-week` to generate a content plan.
 
 **Example using `curl`:**
 ```bash
-curl -X POST http://localhost:3000/generate-week \
+curl -X POST http://localhost:3001/generate-week \
   -H "Content-Type: application/json" \
   -d '{
     "reqWeekIndex": 1,
