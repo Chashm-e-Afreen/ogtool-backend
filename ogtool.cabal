@@ -1,8 +1,8 @@
 cabal-version:       3.8
-name:                acroatic-backend
+name:                ogtool
 version:             0.1.0.0
 
-executable acroatic-b
+executable ogtool
   main-is:             Main.hs
   build-depends:       base >= 4.7 && < 5
                      , scotty
